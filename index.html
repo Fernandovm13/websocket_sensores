@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+<body>
+    <h2>WebSocket Client</h2>
+    <input type="text" id="messageInput" placeholder="Ingrese el mensaje">
+    <button onclick="sendMessage()"></button>
+    <pre id="message"></pre>
+
+    <script>
+        let socket = new WebSocket("http://localhost:8081/ws/handshake")
+
+        socket.onopen = function (event) {
+            console.log("Conectado al WebSocket Server");
+        };
+
+        socket.onmessage = function (event){
+            document.getElementById("message").textContent += `Recibido: ${event.data}\n`;
+        }
+        socket.onclose = function (event) {
+            document.getElementById("message").textContent += `Desconectado del servidor del socket\n`;
+        }
+
+        function sendMessage(){
+            let message = document.getElementById("messageInput").value;
+            socket.send(message);
+            document.getElementById("messageInput").value = "";
+        }
+    </script>
+</body>
+</html>
