@@ -4,11 +4,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// SetWebSocketRoutes configura las rutas WebSocket en el servidor Gin
 func SetWebSocketRoutes(engine *gin.Engine, webSocketAdapter *WebSocketAdapter) {
 	wsGroup := engine.Group("/ws")
 	{
-		// Rutas para WebSocket (handshake)
 		wsGroup.GET("/handshake/temperature", func(c *gin.Context) {
 			webSocketAdapter.HandleWebSocket(c, "temperature")
 		})
