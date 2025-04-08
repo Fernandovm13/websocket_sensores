@@ -18,6 +18,7 @@ func main() {
 	// Configurar Gin
 	r := gin.Default()
 	
+	// Middleware para CORS
 	r.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")

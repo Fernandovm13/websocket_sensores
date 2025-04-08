@@ -1,9 +1,9 @@
 package infrastructure
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
-	"strconv"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -14,331 +14,209 @@ var (
 	upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
-		// En producción, restringe CheckOrigin
-		CheckOrigin: func(r *http.Request) bool { return true },
+		CheckOrigin:     func(r *http.Request) bool { return true },
 	}
 )
 
-// ===== SENSOR TEMPERATURE =====
+type SensorData struct {
+	Temperature float64 `json:"temperature"`
+	Humidity    float64 `json:"humidity"`
+	Light       int     `json:"light"`
+	Sound       int     `json:"sound"`
+	Air         int     `json:"air"`
+	CO2         float64 `json:"co2"`
+	Timestamp   string  `json:"timestamp"`
+}
 
-var (
-	activeTemperatureConnections = make(map[*websocket.Conn]bool)
-	temperatureConnectionsMutex  = &sync.Mutex{}
-	temperatureMessages          []int
-	temperatureMessagesMutex     = &sync.Mutex{}
+type Sensor struct {
+	Connections      map[*websocket.Conn]bool
+	ConnectionsMutex *sync.Mutex
+	Messages         []SensorData
+	MessagesMutex    *sync.Mutex
+}
+
+const (
+	temperatureThreshold = 30.0  // Umbral de temperatura para anomalías
+	humidityThreshold    = 70.0  // Umbral de humedad para anomalías
+	lightThreshold       = 800   // Umbral de luz para anomalías
+	noiseThreshold       = 75    // Umbral de ruido para anomalías
+	airThreshold         = 1000  // Umbral de calidad del aire para anomalías
 )
 
-func HandleWSTemperature(ctx *gin.Context) {
+func NewSensor() *Sensor {
+	return &Sensor{
+		Connections:      make(map[*websocket.Conn]bool),
+		ConnectionsMutex: &sync.Mutex{},
+		Messages:         []SensorData{},
+		MessagesMutex:    &sync.Mutex{},
+	}
+}
+
+// Función para detectar anomalías en los datos del sensor
+func detectAnomalies(sensorName string, data SensorData) {
+	switch sensorName {
+	case "Temperature":
+		if data.Temperature > temperatureThreshold {
+			log.Printf("❗ [%s] Anomalía detectada: Temperatura demasiado alta (%.2f°C)!", sensorName, data.Temperature)
+		} else if data.Temperature < 0 {
+			log.Printf("❗ [%s] Anomalía detectada: Temperatura demasiado baja (%.2f°C)!", sensorName, data.Temperature)
+		}
+
+	case "Humidity":
+		if data.Humidity > humidityThreshold {
+			log.Printf("❗ [%s] Anomalía detectada: Humedad demasiado alta (%.2f%%)!", sensorName, data.Humidity)
+		}
+
+	case "Light":
+		if data.Light > lightThreshold {
+			log.Printf("❗ [%s] Anomalía detectada: Luz demasiado alta (%d lux)!", sensorName, data.Light)
+		}
+
+	case "Noise":
+		if data.Sound > noiseThreshold {
+			log.Printf("❗ [%s] Anomalía detectada: Ruido demasiado alto (%d dB)!", sensorName, data.Sound)
+		}
+
+	case "Air":
+		if data.Air > airThreshold {
+			log.Printf("❗ [%s] Anomalía detectada: Calidad del aire demasiado baja (%d)!", sensorName, data.Air)
+		}
+
+	default:
+		log.Printf("❗ [%s] Anomalía detectada en los datos del sensor (sin filtro): %+v", sensorName, data)
+	}
+}
+
+func handleWebSocket(ctx *gin.Context, sensorName string, sensor *Sensor) {
 	conn, err := upgrader.Upgrade(ctx.Writer, ctx.Request, nil)
 	if err != nil {
-		log.Printf("Temperature - Error al actualizar a WebSocket: %v", err)
+		log.Printf("❌ [%s] Error al actualizar a WebSocket: %v", sensorName, err)
 		return
 	}
 
-	temperatureConnectionsMutex.Lock()
-	activeTemperatureConnections[conn] = true
-	temperatureConnectionsMutex.Unlock()
+	sensor.ConnectionsMutex.Lock()
+	sensor.Connections[conn] = true
+	sensor.ConnectionsMutex.Unlock()
 
-	log.Printf("Temperature - Conexión establecida desde: %s", conn.RemoteAddr())
+	log.Printf("✅ [%s] Conexión establecida desde: %s", sensorName, conn.RemoteAddr())
 
 	defer func() {
-		temperatureConnectionsMutex.Lock()
-		delete(activeTemperatureConnections, conn)
-		temperatureConnectionsMutex.Unlock()
+		sensor.ConnectionsMutex.Lock()
+		delete(sensor.Connections, conn)
+		sensor.ConnectionsMutex.Unlock()
 		conn.Close()
-		log.Printf("Temperature - Conexión cerrada: %s", conn.RemoteAddr())
+		log.Printf("🔌 [%s] Conexión cerrada: %s", sensorName, conn.RemoteAddr())
 	}()
 
 	for {
 		messageType, p, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("Temperature - Error de lectura: %v", err)
+			log.Printf("⚠️ [%s] Error de lectura: %v", sensorName, err)
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+				break
 			}
-			break
-		}
-
-		messageStr := string(p)
-		log.Printf("Temperature - Mensaje recibido (RAW): %s", messageStr)
-
-		num, err := strconv.Atoi(messageStr)
-		if err != nil {
-			log.Printf("Temperature - Mensaje no numérico: %s", messageStr)
-			conn.WriteMessage(websocket.TextMessage, []byte("ERROR: Se esperaba un número"))
 			continue
 		}
 
-		temperatureMessagesMutex.Lock()
-		temperatureMessages = append(temperatureMessages, num)
-		if len(temperatureMessages) > 100 {
-			temperatureMessages = temperatureMessages[1:]
+		var sensorData SensorData
+		if err := json.Unmarshal(p, &sensorData); err != nil {
+			log.Printf("❗ [%s] Error al parsear el mensaje: %v", sensorName, err)
+			continue
 		}
-		temperatureMessagesMutex.Unlock()
 
-		log.Printf("Temperature - Número procesado y almacenado: %d", num)
+		// Log solo los datos del sensor específico
+		switch sensorName {
+		case "Air":
+			log.Printf("📩 [%s] Datos recibidos: Air: %d, Timestamp: %s", sensorName, sensorData.Air, sensorData.Timestamp)
+		case "Temperature":
+			log.Printf("📩 [%s] Datos recibidos: Temperature: %.2f, Timestamp: %s", sensorName, sensorData.Temperature, sensorData.Timestamp)
+		case "Humidity":
+			log.Printf("📩 [%s] Datos recibidos: Humidity: %.2f, Timestamp: %s", sensorName, sensorData.Humidity, sensorData.Timestamp)
+		case "Light":
+			log.Printf("📩 [%s] Datos recibidos: Light: %d, Timestamp: %s", sensorName, sensorData.Light, sensorData.Timestamp)
+		case "Noise":
+			log.Printf("📩 [%s] Datos recibidos: Sound: %d, Timestamp: %s", sensorName, sensorData.Sound, sensorData.Timestamp)
+		}
 
-		if err := conn.WriteMessage(messageType, []byte(strconv.Itoa(num))); err != nil {
-			log.Printf("Temperature - Error al enviar respuesta: %v", err)
+		// Detectar anomalías antes de guardar los datos
+		detectAnomalies(sensorName, sensorData)
+
+		// Guardar los datos sin necesidad de filtrado extra
+		sensor.MessagesMutex.Lock()
+		sensor.Messages = append(sensor.Messages, sensorData)
+		if len(sensor.Messages) > 100 {
+			sensor.Messages = sensor.Messages[1:]
+		}
+		sensor.MessagesMutex.Unlock()
+
+		// Enviar el mensaje de vuelta al WebSocket
+		if err := conn.WriteMessage(messageType, p); err != nil {
+			log.Printf("⚠️ [%s] Error al enviar respuesta: %v", sensorName, err)
 			break
 		}
 	}
+}
+
+func listMessages(ctx *gin.Context, sensorName string, sensor *Sensor) {
+	sensor.MessagesMutex.Lock()
+	defer sensor.MessagesMutex.Unlock()
+
+	history := sensor.Messages
+	if history == nil {
+		history = []SensorData{}
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"sensor":   sensorName,
+		"messages": history,
+		"count":    len(history),
+		"status":   "success",
+	})
+
+	log.Printf("📦 [%s] Historial solicitado. Total: %d", sensorName, len(history))
+}
+
+
+// ====== TEMPERATURE ======
+var temperatureSensor = NewSensor()
+
+func HandleWSTemperature(ctx *gin.Context) {
+	handleWebSocket(ctx, "Temperature", temperatureSensor)
 }
 
 func ListTemperatureMessages(ctx *gin.Context) {
-	temperatureMessagesMutex.Lock()
-	defer temperatureMessagesMutex.Unlock()
-
-	history := temperatureMessages
-	if history == nil {
-		history = []int{}
-	}
-
-	ctx.JSON(http.StatusOK, gin.H{
-		"messages": history,
-		"count":    len(history),
-		"status":   "success",
-	})
+	listMessages(ctx, "Temperature", temperatureSensor)
 }
 
-// ===== SENSOR NOISE =====
-
-var (
-	activeNoiseConnections = make(map[*websocket.Conn]bool)
-	noiseConnectionsMutex  = &sync.Mutex{}
-	noiseMessages          []int
-	noiseMessagesMutex     = &sync.Mutex{}
-)
+// ====== NOISE ======
+var noiseSensor = NewSensor()
 
 func HandleWSNoise(ctx *gin.Context) {
-	conn, err := upgrader.Upgrade(ctx.Writer, ctx.Request, nil)
-	if err != nil {
-		log.Printf("Noise - Error al actualizar a WebSocket: %v", err)
-		return
-	}
-
-	noiseConnectionsMutex.Lock()
-	activeNoiseConnections[conn] = true
-	noiseConnectionsMutex.Unlock()
-
-	log.Printf("Noise - Conexión establecida desde: %s", conn.RemoteAddr())
-
-	defer func() {
-		noiseConnectionsMutex.Lock()
-		delete(activeNoiseConnections, conn)
-		noiseConnectionsMutex.Unlock()
-		conn.Close()
-		log.Printf("Noise - Conexión cerrada: %s", conn.RemoteAddr())
-	}()
-
-	for {
-		messageType, p, err := conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("Noise - Error de lectura: %v", err)
-			}
-			break
-		}
-
-		messageStr := string(p)
-		log.Printf("Noise - Mensaje recibido (RAW): %s", messageStr)
-
-		num, err := strconv.Atoi(messageStr)
-		if err != nil {
-			log.Printf("Noise - Mensaje no numérico: %s", messageStr)
-			conn.WriteMessage(websocket.TextMessage, []byte("ERROR: Se esperaba un número"))
-			continue
-		}
-
-		noiseMessagesMutex.Lock()
-		noiseMessages = append(noiseMessages, num)
-		if len(noiseMessages) > 100 {
-			noiseMessages = noiseMessages[1:]
-		}
-		noiseMessagesMutex.Unlock()
-
-		log.Printf("Noise - Número procesado y almacenado: %d", num)
-
-		if err := conn.WriteMessage(messageType, []byte(strconv.Itoa(num))); err != nil {
-			log.Printf("Noise - Error al enviar respuesta: %v", err)
-			break
-		}
-	}
+	handleWebSocket(ctx, "Noise", noiseSensor)
 }
 
 func ListNoiseMessages(ctx *gin.Context) {
-	noiseMessagesMutex.Lock()
-	defer noiseMessagesMutex.Unlock()
-
-	history := noiseMessages
-	if history == nil {
-		history = []int{}
-	}
-
-	ctx.JSON(http.StatusOK, gin.H{
-		"messages": history,
-		"count":    len(history),
-		"status":   "success",
-	})
+	listMessages(ctx, "Noise", noiseSensor)
 }
 
-// ===== SENSOR LIGHT =====
-
-var (
-	activeLightConnections = make(map[*websocket.Conn]bool)
-	lightConnectionsMutex  = &sync.Mutex{}
-	lightMessages          []int
-	lightMessagesMutex     = &sync.Mutex{}
-)
+// ====== LIGHT ======
+var lightSensor = NewSensor()
 
 func HandleWSLight(ctx *gin.Context) {
-	conn, err := upgrader.Upgrade(ctx.Writer, ctx.Request, nil)
-	if err != nil {
-		log.Printf("Light - Error al actualizar a WebSocket: %v", err)
-		return
-	}
-
-	lightConnectionsMutex.Lock()
-	activeLightConnections[conn] = true
-	lightConnectionsMutex.Unlock()
-
-	log.Printf("Light - Conexión establecida desde: %s", conn.RemoteAddr())
-
-	defer func() {
-		lightConnectionsMutex.Lock()
-		delete(activeLightConnections, conn)
-		lightConnectionsMutex.Unlock()
-		conn.Close()
-		log.Printf("Light - Conexión cerrada: %s", conn.RemoteAddr())
-	}()
-
-	for {
-		messageType, p, err := conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("Light - Error de lectura: %v", err)
-			}
-			break
-		}
-
-		messageStr := string(p)
-		log.Printf("Light - Mensaje recibido (RAW): %s", messageStr)
-
-		num, err := strconv.Atoi(messageStr)
-		if err != nil {
-			log.Printf("Light - Mensaje no numérico: %s", messageStr)
-			conn.WriteMessage(websocket.TextMessage, []byte("ERROR: Se esperaba un número"))
-			continue
-		}
-
-		lightMessagesMutex.Lock()
-		lightMessages = append(lightMessages, num)
-		if len(lightMessages) > 100 {
-			lightMessages = lightMessages[1:]
-		}
-		lightMessagesMutex.Unlock()
-
-		log.Printf("Light - Número procesado y almacenado: %d", num)
-
-		if err := conn.WriteMessage(messageType, []byte(strconv.Itoa(num))); err != nil {
-			log.Printf("Light - Error al enviar respuesta: %v", err)
-			break
-		}
-	}
+	handleWebSocket(ctx, "Light", lightSensor)
 }
 
 func ListLightMessages(ctx *gin.Context) {
-	lightMessagesMutex.Lock()
-	defer lightMessagesMutex.Unlock()
-
-	history := lightMessages
-	if history == nil {
-		history = []int{}
-	}
-
-	ctx.JSON(http.StatusOK, gin.H{
-		"messages": history,
-		"count":    len(history),
-		"status":   "success",
-	})
+	listMessages(ctx, "Light", lightSensor)
 }
 
-// ===== SENSOR AIR (Calidad del aire) =====
-
-var (
-	activeAirConnections = make(map[*websocket.Conn]bool)
-	airConnectionsMutex  = &sync.Mutex{}
-	airMessages          []int
-	airMessagesMutex     = &sync.Mutex{}
-)
+// ====== AIR ======
+var airSensor = NewSensor()
 
 func HandleWSAir(ctx *gin.Context) {
-	conn, err := upgrader.Upgrade(ctx.Writer, ctx.Request, nil)
-	if err != nil {
-		log.Printf("Air - Error al actualizar a WebSocket: %v", err)
-		return
-	}
-
-	airConnectionsMutex.Lock()
-	activeAirConnections[conn] = true
-	airConnectionsMutex.Unlock()
-
-	log.Printf("Air - Conexión establecida desde: %s", conn.RemoteAddr())
-
-	defer func() {
-		airConnectionsMutex.Lock()
-		delete(activeAirConnections, conn)
-		airConnectionsMutex.Unlock()
-		conn.Close()
-		log.Printf("Air - Conexión cerrada: %s", conn.RemoteAddr())
-	}()
-
-	for {
-		messageType, p, err := conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("Air - Error de lectura: %v", err)
-			}
-			break
-		}
-
-		messageStr := string(p)
-		log.Printf("Air - Mensaje recibido (RAW): %s", messageStr)
-
-		num, err := strconv.Atoi(messageStr)
-		if err != nil {
-			log.Printf("Air - Mensaje no numérico: %s", messageStr)
-			conn.WriteMessage(websocket.TextMessage, []byte("ERROR: Se esperaba un número"))
-			continue
-		}
-
-		airMessagesMutex.Lock()
-		airMessages = append(airMessages, num)
-		if len(airMessages) > 100 {
-			airMessages = airMessages[1:]
-		}
-		airMessagesMutex.Unlock()
-
-		log.Printf("Air - Número procesado y almacenado: %d", num)
-
-		if err := conn.WriteMessage(messageType, []byte(strconv.Itoa(num))); err != nil {
-			log.Printf("Air - Error al enviar respuesta: %v", err)
-			break
-		}
-	}
+	handleWebSocket(ctx, "Air", airSensor)
 }
 
 func ListAirMessages(ctx *gin.Context) {
-	airMessagesMutex.Lock()
-	defer airMessagesMutex.Unlock()
-
-	history := airMessages
-	if history == nil {
-		history = []int{}
-	}
-
-	ctx.JSON(http.StatusOK, gin.H{
-		"messages": history,
-		"count":    len(history),
-		"status":   "success",
-	})
+	listMessages(ctx, "Air", airSensor)
 }
