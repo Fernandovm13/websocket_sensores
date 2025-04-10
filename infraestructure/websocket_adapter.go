@@ -11,16 +11,15 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type WebSocketAdapter struct {
+	WebSocketPort application.WebSocketPort
+	Connections  map[*websocket.Conn]bool
+}
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin:     func(r *http.Request) bool { return true },
-}
-
-type WebSocketAdapter struct {
-	WebSocketPort application.WebSocketPort
-	Connections  map[*websocket.Conn]bool
 }
 
 func NewWebSocketAdapter(service application.WebSocketPort) *WebSocketAdapter {
@@ -36,42 +35,59 @@ func (wa *WebSocketAdapter) HandleWebSocket(ctx *gin.Context, sensorName string)
 		log.Printf("❌ [%s] Error al actualizar a WebSocket: %v", sensorName, err)
 		return
 	}
+	defer conn.Close()
 
-	wa.Connections[conn] = true
-
+	// Esperar mensaje de WebSocket
 	for {
-		_, p, err := conn.ReadMessage()
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("⚠️ [%s] Error de lectura: %v", sensorName, err)
 			break
 		}
 
-		var sensorData domain.SensorData
-		if err := json.Unmarshal(p, &sensorData); err != nil {
-			log.Printf("❗ [%s] Error al parsear el mensaje: %v", sensorName, err)
-			continue
+		switch sensorName {
+		case "temperature":
+			var data domain.TemperatureHumidity
+			if err := json.Unmarshal(msg, &data); err != nil {
+				log.Printf("❗ [%s] Error al parsear el mensaje: %v", sensorName, err)
+				continue
+			}
+			wa.WebSocketPort.HandleSensorData(sensorName, data)
+		case "humidity":
+			var data domain.TemperatureHumidity
+			if err := json.Unmarshal(msg, &data); err != nil {
+				log.Printf("❗ [%s] Error al parsear el mensaje: %v", sensorName, err)
+				continue
+			}
+			wa.WebSocketPort.HandleSensorData(sensorName, data)
+		case "light":
+			var data domain.Light
+			if err := json.Unmarshal(msg, &data); err != nil {
+				log.Printf("❗ [%s] Error al parsear el mensaje: %v", sensorName, err)
+				continue
+			}
+			wa.WebSocketPort.HandleSensorData(sensorName, data)
+		case "sound":
+			var data domain.SoundSensor
+			if err := json.Unmarshal(msg, &data); err != nil {
+				log.Printf("❗ [%s] Error al parsear el mensaje: %v", sensorName, err)
+				continue
+			}
+			wa.WebSocketPort.HandleSensorData(sensorName, data)
+		case "air":
+			var data domain.AirQualitySensor
+			if err := json.Unmarshal(msg, &data); err != nil {
+				log.Printf("❗ [%s] Error al parsear el mensaje: %v", sensorName, err)
+				continue
+			}
+			wa.WebSocketPort.HandleSensorData(sensorName, data)
+		default:
+			log.Printf("❗ Sensor no reconocido: %s", sensorName)
 		}
 
-		if err := wa.WebSocketPort.HandleSensorData(sensorName, sensorData); err != nil {
-			log.Printf("❌ [%s] Error al procesar datos del sensor: %v", sensorName, err)
-			continue
-		}
-
-		response := map[string]string{
-			"status":  "success",
-			"message": "Datos recibidos correctamente",
-		}
+		// Responder con un mensaje de éxito
+		response := map[string]string{"status": "success", "message": "Datos recibidos correctamente"}
 		responsePayload, _ := json.Marshal(response)
 		conn.WriteMessage(websocket.TextMessage, responsePayload)
-	}
-}
-
-func (wa *WebSocketAdapter) BroadcastMessage(message []byte) {
-	for conn := range wa.Connections {
-		if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
-			log.Printf("❌ Error enviando mensaje a cliente: %v", err)
-			conn.Close()
-			delete(wa.Connections, conn)
-		}
 	}
 }
