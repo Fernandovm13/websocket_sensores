@@ -37,7 +37,6 @@ func (wa *WebSocketAdapter) HandleWebSocket(ctx *gin.Context, sensorName string)
 	}
 	defer conn.Close()
 
-	// Esperar mensaje de WebSocket
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {

@@ -1,10 +1,9 @@
 package domain
 
 type SoundSensor struct {
-	ID        int    `json:"id"`
-	SensorID  string `json:"sensor_id"`
-	RuidoDB   int    `json:"nivel"`
-	Timestamp string `json:"timestamp"`
+    SensorID  string  `json:"SensorID"`
+    RuidoDB   int     `json:"RuidoDB"`
+    Timestamp string  `json:"Timestamp"`
 }
 
 func (s SoundSensor) GetSensorID() string {

@@ -43,8 +43,8 @@ func (ad *AnomalyDetector) Detect(sensorName string, data SensorData) {
 		}
 	case "Air":
 		if a, ok := data.(AirQualitySensor); ok {
-			if a.Air_level > airThreshold {
-				log.Printf("❗ [%s] Anomalía detectada: Calidad del aire demasiado baja (%d)!", sensorName, a.Air_level)
+			if a.AirLevel > airThreshold {
+				log.Printf("❗ [%s] Anomalía detectada: Calidad del aire demasiado baja (%d)!", sensorName, a.AirLevel)
 			}
 		}
 	}
