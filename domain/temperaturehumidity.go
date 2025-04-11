@@ -7,7 +7,6 @@ type TemperatureHumidity struct {
 	Timestamp   string  `json:"timestamp"`
 }
 
-// Implementa los métodos de la interfaz SensorData
 func (t TemperatureHumidity) GetSensorID() string {
 	return t.SensorID
 }

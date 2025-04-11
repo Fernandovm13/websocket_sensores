@@ -22,5 +22,18 @@ func SetWebSocketRoutes(engine *gin.Engine, webSocketAdapter *WebSocketAdapter) 
 		wsGroup.GET("/handshake/air", func(c *gin.Context) {
 			webSocketAdapter.HandleWebSocket(c, "air")
 		})
+
+		wsGroup.GET("/messages/temperature", func(c *gin.Context) {
+			webSocketAdapter.HandleWebSocket(c, "temperature")
+		})
+		wsGroup.GET("/messages/noise", func(c *gin.Context) {
+			webSocketAdapter.HandleWebSocket(c, "noise")
+		})
+		wsGroup.GET("/messages/light", func(c *gin.Context) {
+			webSocketAdapter.HandleWebSocket(c, "light")
+		})
+		wsGroup.GET("/messages/air", func(c *gin.Context) {
+			webSocketAdapter.HandleWebSocket(c, "air")
+		})
 	}
 }
